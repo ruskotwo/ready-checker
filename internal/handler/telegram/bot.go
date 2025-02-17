@@ -95,9 +95,7 @@ func (b *Bot) handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			),
 		)
 
-		duration, _ := utils.ExtractDuration(msg.Text)
-
-		timer, duration := b.pending.Start(strconv.Itoa(int(msg.Chat.ID)), statuses, duration)
+		timer, duration := b.pending.Start(strconv.Itoa(int(msg.Chat.ID)), statuses, utils.ExtractDuration(msg.Text))
 
 		listMsg := tgbotapi.NewMessage(msg.Chat.ID, b.makeTextForList(statuses, duration))
 		listMsg.ReplyToMessageID = msg.MessageID
@@ -170,12 +168,10 @@ func (b *Bot) update(
 	statuses pending.Statuses,
 	keepWait bool,
 ) {
-	duration, _ := utils.ExtractDuration(msg.Text)
-
 	listMsg := tgbotapi.NewEditMessageText(
 		msg.Chat.ID,
 		msg.MessageID,
-		b.makeTextForList(statuses, duration),
+		b.makeTextForList(statuses, utils.ExtractDuration(msg.Text)),
 	)
 	if keepWait && result == pending.Wait {
 		listMsg.ReplyMarkup = msg.ReplyMarkup
@@ -198,7 +194,7 @@ func (b *Bot) update(
 }
 
 func (b *Bot) makeTextForList(pendingUsers pending.Statuses, duration time.Duration) string {
-	text := fmt.Sprintf("Проверка готовности (%dm):\n\n", int(duration.Minutes()))
+	text := fmt.Sprintf("Проверка готовности (%s):\n\n", utils.FormatDurationToString(duration))
 
 	for user, status := range pendingUsers {
 		switch status {
