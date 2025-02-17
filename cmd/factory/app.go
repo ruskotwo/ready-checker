@@ -15,6 +15,7 @@ var appSet = wire.NewSet(
 	config.NewConfig,
 	config.NewRedisOptions,
 	pending.NewStorage,
+	pending.NewPending,
 	redislib.NewClient,
 )
 

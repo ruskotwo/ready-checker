@@ -11,7 +11,8 @@ func (i Status) MarshalBinary() ([]byte, error) {
 }
 
 const (
-	Wait Status = iota
+	Undefined Status = iota
+	Wait
 	Ready
 	Cancel
 )

@@ -10,7 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/ruskotwo/ready-checker/internal/config"
 	"github.com/ruskotwo/ready-checker/internal/domain/pending"
-	"github.com/ruskotwo/ready-checker/internal/domain/telegram"
+	"github.com/ruskotwo/ready-checker/internal/handler/telegram"
 )
 
 // Injectors from wire.go:
@@ -21,7 +21,8 @@ func InitTelegramBot() (*telegram.Bot, func(), error) {
 	options := config.NewRedisOptions()
 	client := redis.NewClient(options)
 	storage := pending.NewStorage(client)
-	bot := telegram.NewBot(appConfig, logger, storage)
+	pendingPending := pending.NewPending(storage)
+	bot := telegram.NewBot(appConfig, logger, pendingPending)
 	return bot, func() {
 	}, nil
 }

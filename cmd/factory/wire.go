@@ -5,7 +5,7 @@ package factory
 
 import (
 	"github.com/google/wire"
-	"github.com/ruskotwo/ready-checker/internal/domain/telegram"
+	"github.com/ruskotwo/ready-checker/internal/handler/telegram"
 )
 
 func InitTelegramBot() (*telegram.Bot, func(), error) {

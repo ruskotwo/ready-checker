@@ -16,20 +16,20 @@ const (
 )
 
 type Bot struct {
-	config         *config.AppConfig
-	logger         *slog.Logger
-	pendingStorage *pending.Storage
+	config  *config.AppConfig
+	logger  *slog.Logger
+	pending *pending.Pending
 }
 
 func NewBot(
 	config *config.AppConfig,
 	logger *slog.Logger,
-	pendingStorage *pending.Storage,
+	pending *pending.Pending,
 ) *Bot {
 	return &Bot{
 		config,
 		logger,
-		pendingStorage,
+		pending,
 	}
 }
 
@@ -60,10 +60,10 @@ func (b *Bot) handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			b.sendErrorNeedMentions(bot, msg)
 		}
 
-		pendingUsers := make(pending.Statuses)
+		statuses := make(pending.Statuses)
 		for _, entity := range msg.Entities {
 			if entity.Type == "mention" {
-				pendingUsers[msg.Text[entity.Offset+1:entity.Offset+entity.Length]] = pending.Wait
+				statuses[msg.Text[entity.Offset+1:entity.Offset+entity.Length]] = pending.Wait
 			}
 		}
 
@@ -71,16 +71,16 @@ func (b *Bot) handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			fmt.Sprintf(
 				"Handle /check from %s mention %s",
 				msg.From.UserName,
-				fmt.Sprint(pendingUsers),
+				fmt.Sprint(statuses),
 			),
 		)
 
-		if len(pendingUsers) == 0 {
+		if len(statuses) == 0 {
 			b.sendErrorNeedMentions(bot, msg)
 			return
 		}
 
-		pendingUsers[msg.From.UserName] = pending.Wait
+		statuses[msg.From.UserName] = pending.Wait
 
 		keyboard := tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
@@ -89,12 +89,14 @@ func (b *Bot) handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			),
 		)
 
-		listMsg := tgbotapi.NewMessage(msg.Chat.ID, b.makeTextForList(pendingUsers))
+		listMsg := tgbotapi.NewMessage(msg.Chat.ID, b.makeTextForList(statuses))
 		listMsg.ReplyToMessageID = msg.MessageID
 		listMsg.ReplyMarkup = keyboard
 
-		b.pendingStorage.Clean(strconv.Itoa(int(msg.Chat.ID)))
-		b.pendingStorage.SetMany(strconv.Itoa(int(msg.Chat.ID)), pendingUsers)
+		if err := b.pending.Start(strconv.Itoa(int(msg.Chat.ID)), statuses); err != nil {
+			b.logger.Error(err.Error())
+			return
+		}
 
 		if _, err := bot.Send(listMsg); err != nil {
 			b.logger.Error(err.Error())
@@ -109,42 +111,40 @@ func (b *Bot) handleCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery
 		return
 	}
 
-	pendingUsers := b.pendingStorage.Get(strconv.Itoa(int(query.Message.Chat.ID)))
-
+	var status pending.Status
 	switch query.Data {
 	case readyButton:
-		pendingUsers[query.From.UserName] = pending.Ready
+		status = pending.Ready
 	case canselButton:
-		pendingUsers[query.From.UserName] = pending.Cancel
+		status = pending.Cancel
 	}
 
-	nobodyWait := true
-	for _, status := range pendingUsers {
-		if status == pending.Wait {
-			nobodyWait = false
-			break
-		}
+	result, statuses, err := b.pending.Update(
+		strconv.Itoa(int(query.Message.Chat.ID)),
+		query.From.UserName,
+		status,
+	)
+	if err != nil {
+		return
 	}
 
 	listMsg := tgbotapi.NewEditMessageText(
 		query.Message.Chat.ID,
 		query.Message.MessageID,
-		b.makeTextForList(pendingUsers),
+		b.makeTextForList(statuses),
 	)
-	if !nobodyWait {
+	if result == pending.Wait {
 		listMsg.ReplyMarkup = query.Message.ReplyMarkup
 	}
 	if _, err := bot.Send(listMsg); err != nil {
 		b.logger.Error(err.Error())
 	}
 
-	b.pendingStorage.Set(strconv.Itoa(int(query.Message.Chat.ID)), query.From.UserName, pendingUsers[query.From.UserName])
-
-	if !nobodyWait {
+	if result == pending.Wait {
 		return
 	}
 
-	resultMsg := tgbotapi.NewMessage(query.Message.Chat.ID, b.makeTextForResult(pendingUsers))
+	resultMsg := tgbotapi.NewMessage(query.Message.Chat.ID, b.makeTextForResult(result, statuses))
 	resultMsg.ReplyToMessageID = query.Message.MessageID
 
 	if _, err := bot.Send(resultMsg); err != nil {
@@ -171,14 +171,21 @@ func (b *Bot) makeTextForList(pendingUsers pending.Statuses) string {
 	return text
 }
 
-func (b *Bot) makeTextForResult(pendingUsers pending.Statuses) string {
-	text := "От всех пользователей получен ответ:\n"
+func (b *Bot) makeTextForResult(result pending.Status, statuses pending.Statuses) (text string) {
+	switch result {
+	case pending.Undefined:
+		text += "🟨 Не все подтвердили готовность\n"
+	case pending.Ready:
+		text += "🟩 Все подтвердили готовность!\n"
+	case pending.Cancel:
+		text += "🟥 Никто не подтвердил готовность.\n"
+	}
 
-	for user := range pendingUsers {
+	for user := range statuses {
 		text += fmt.Sprintf("@%s ", user)
 	}
 
-	return text
+	return
 }
 
 func (b *Bot) sendErrorNeedMentions(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
