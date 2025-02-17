@@ -1,7 +1,6 @@
 package factory
 
 import (
-	"github.com/ruskotwo/ready-checker/internal/domain/pending"
 	"log/slog"
 	"os"
 
@@ -14,8 +13,6 @@ var appSet = wire.NewSet(
 	provideLogger,
 	config.NewConfig,
 	config.NewRedisOptions,
-	pending.NewStorage,
-	pending.NewPending,
 	redislib.NewClient,
 )
 

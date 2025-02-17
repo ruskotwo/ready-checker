@@ -5,9 +5,11 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/ruskotwo/ready-checker/internal/config"
 	"github.com/ruskotwo/ready-checker/internal/domain/pending"
+	"github.com/ruskotwo/ready-checker/internal/utils"
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -60,16 +62,20 @@ func (b *Bot) handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			b.sendErrorNeedMentions(bot, msg)
 		}
 
+		textRunes := []rune(msg.Text)
 		statuses := make(pending.Statuses)
 		for _, entity := range msg.Entities {
 			if entity.Type == "mention" {
-				statuses[msg.Text[entity.Offset+1:entity.Offset+entity.Length]] = pending.Wait
+				username := string(textRunes[entity.Offset+1 : entity.Offset+entity.Length])
+
+				statuses[username] = pending.Wait
 			}
 		}
 
 		b.logger.Info(
 			fmt.Sprintf(
-				"Handle /check from %s mention %s",
+				"Handle /check from %d@%s mention %s",
+				msg.Chat.ID,
 				msg.From.UserName,
 				fmt.Sprint(statuses),
 			),
@@ -89,23 +95,25 @@ func (b *Bot) handleMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			),
 		)
 
-		listMsg := tgbotapi.NewMessage(msg.Chat.ID, b.makeTextForList(statuses))
+		duration, _ := utils.ExtractDuration(msg.Text)
+
+		timer, duration := b.pending.Start(strconv.Itoa(int(msg.Chat.ID)), statuses, duration)
+
+		listMsg := tgbotapi.NewMessage(msg.Chat.ID, b.makeTextForList(statuses, duration))
 		listMsg.ReplyToMessageID = msg.MessageID
 		listMsg.ReplyMarkup = keyboard
 
-		if err := b.pending.Start(strconv.Itoa(int(msg.Chat.ID)), statuses); err != nil {
+		sentMsg, err := bot.Send(listMsg)
+		if err != nil {
 			b.logger.Error(err.Error())
-			return
 		}
 
-		if _, err := bot.Send(listMsg); err != nil {
-			b.logger.Error(err.Error())
-		}
+		go b.waitTimer(timer, bot, &sentMsg)
 	}
 }
 
 func (b *Bot) handleCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery) {
-	b.logger.Info(fmt.Sprintf("Got %s from %s", query.Data, query.From.UserName))
+	b.logger.Info(fmt.Sprintf("Got %s from %d@%s", query.Data, query.Message.Chat.ID, query.From.UserName))
 
 	if query.Data != readyButton && query.Data != canselButton {
 		return
@@ -119,41 +127,78 @@ func (b *Bot) handleCallback(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery
 		status = pending.Cancel
 	}
 
-	result, statuses, err := b.pending.Update(
+	result, statuses := b.pending.HandleStatus(
 		strconv.Itoa(int(query.Message.Chat.ID)),
 		query.From.UserName,
 		status,
 	)
-	if err != nil {
-		return
+
+	b.update(
+		bot,
+		query.Message,
+		result,
+		statuses,
+		true,
+	)
+}
+
+func (b *Bot) waitTimer(timer chan bool, bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	for signal := range timer {
+		if !signal {
+			return
+		}
+
+		b.logger.Info(fmt.Sprintf("End timer for %d", msg.Chat.ID))
+
+		result, statuses := b.pending.GetStatusesWithResult(strconv.Itoa(int(msg.Chat.ID)))
+
+		b.update(
+			bot,
+			msg,
+			result,
+			statuses,
+			false,
+		)
+
 	}
+}
+
+func (b *Bot) update(
+	bot *tgbotapi.BotAPI,
+	msg *tgbotapi.Message,
+	result pending.Status,
+	statuses pending.Statuses,
+	keepWait bool,
+) {
+	duration, _ := utils.ExtractDuration(msg.Text)
 
 	listMsg := tgbotapi.NewEditMessageText(
-		query.Message.Chat.ID,
-		query.Message.MessageID,
-		b.makeTextForList(statuses),
+		msg.Chat.ID,
+		msg.MessageID,
+		b.makeTextForList(statuses, duration),
 	)
-	if result == pending.Wait {
-		listMsg.ReplyMarkup = query.Message.ReplyMarkup
+	if keepWait && result == pending.Wait {
+		listMsg.ReplyMarkup = msg.ReplyMarkup
 	}
 	if _, err := bot.Send(listMsg); err != nil {
 		b.logger.Error(err.Error())
 	}
 
-	if result == pending.Wait {
+	if keepWait && result == pending.Wait {
+		b.logger.Info(fmt.Sprintf("Keep wait chat %d", msg.Chat.ID))
 		return
 	}
 
-	resultMsg := tgbotapi.NewMessage(query.Message.Chat.ID, b.makeTextForResult(result, statuses))
-	resultMsg.ReplyToMessageID = query.Message.MessageID
+	resultMsg := tgbotapi.NewMessage(msg.Chat.ID, b.makeTextForResult(result, statuses))
+	resultMsg.ReplyToMessageID = msg.MessageID
 
 	if _, err := bot.Send(resultMsg); err != nil {
 		b.logger.Error(err.Error())
 	}
 }
 
-func (b *Bot) makeTextForList(pendingUsers pending.Statuses) string {
-	text := "Проверка готовности:\n\n"
+func (b *Bot) makeTextForList(pendingUsers pending.Statuses, duration time.Duration) string {
+	text := fmt.Sprintf("Проверка готовности (%dm):\n\n", int(duration.Minutes()))
 
 	for user, status := range pendingUsers {
 		switch status {
@@ -175,6 +220,8 @@ func (b *Bot) makeTextForResult(result pending.Status, statuses pending.Statuses
 	switch result {
 	case pending.Undefined:
 		text += "🟨 Не все подтвердили готовность\n"
+	case pending.Wait:
+		text += "⬜️ Время истекло.\n"
 	case pending.Ready:
 		text += "🟩 Все подтвердили готовность!\n"
 	case pending.Cancel:

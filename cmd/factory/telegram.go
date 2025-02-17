@@ -6,6 +6,6 @@ import (
 )
 
 var telegramSet = wire.NewSet(
-	appSet,
+	pendingSet,
 	telegram.NewBot,
 )

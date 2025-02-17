@@ -21,7 +21,8 @@ func InitTelegramBot() (*telegram.Bot, func(), error) {
 	options := config.NewRedisOptions()
 	client := redis.NewClient(options)
 	storage := pending.NewStorage(client)
-	pendingPending := pending.NewPending(storage)
+	timer := pending.NewTimer(logger)
+	pendingPending := pending.NewPending(storage, timer)
 	bot := telegram.NewBot(appConfig, logger, pendingPending)
 	return bot, func() {
 	}, nil
